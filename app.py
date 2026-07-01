@@ -797,6 +797,40 @@ def convertir_excel_formato_quincenal(df_filtrado, mes_seleccionado):
     return salida.getvalue()
 
 
+
+
+# =========================================================
+# SUPABASE: RESET Y LIMPIEZA DE PRUEBAS
+# =========================================================
+
+def eliminar_todos_registros_tabla(tabla):
+    """
+    Elimina todos los registros de una tabla usando el campo id.
+    Mantiene la estructura de Supabase y solo borra datos.
+    """
+    try:
+        supabase.table(tabla).delete().neq("id", 0).execute()
+        return True, f"Registros eliminados de {tabla}."
+    except Exception as e:
+        return False, f"No se pudo limpiar {tabla}: {e}"
+
+
+def eliminar_solicitud_por_id(id_solicitud):
+    try:
+        supabase.table("solicitudes_alimento").delete().eq("id", int(id_solicitud)).execute()
+        return True, f"Solicitud ID {id_solicitud} eliminada correctamente."
+    except Exception as e:
+        return False, f"No se pudo eliminar la solicitud: {e}"
+
+
+def marcar_solicitudes_pendientes():
+    try:
+        supabase.table("solicitudes_alimento").update({"estado": "Pendiente"}).neq("id", 0).execute()
+        return True, "Todas las solicitudes fueron marcadas como Pendiente."
+    except Exception as e:
+        return False, f"No se pudo actualizar solicitudes: {e}"
+
+
 # =========================================================
 # UI: MENÚ Y ACCESO
 # =========================================================
@@ -840,6 +874,7 @@ else:
             "Productos",
             "Usuarios admin",
             "Reportes",
+            "Reset / limpieza",
             "Configuración"
         ]
     )
@@ -1503,6 +1538,112 @@ if menu == "Reportes":
     st.dataframe(anticipo, use_container_width=True)
 
 
+
+# =========================================================
+# MÓDULO: RESET / LIMPIEZA
+# =========================================================
+
+if menu == "Reset / limpieza":
+    st.markdown("""
+    <div class="header">
+        <h1>🧹 Reset / limpieza de pruebas</h1>
+        <h3>Eliminar registros de prueba antes de usar el portal en la empresa</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.error("Zona delicada: estas acciones eliminan datos de Supabase y no se pueden deshacer.")
+    st.info("Recomendado antes de partir oficialmente: eliminar solo las solicitudes de prueba. Mantenga trabajadores y productos si ya están correctos.")
+
+    tab1, tab2, tab3 = st.tabs(["🗑️ Eliminar solicitud", "🔄 Reset solicitudes", "⚠️ Reset avanzado"])
+
+    with tab1:
+        st.write("### Eliminar una solicitud específica")
+        df_sol = preparar_solicitudes_con_nombre()
+        if df_sol.empty:
+            st.info("No hay solicitudes registradas.")
+        else:
+            columnas = [c for c in ["id", "fecha", "rut", "nombre", "monto_solicitado", "producto1", "cantidad1", "estado"] if c in df_sol.columns]
+            st.dataframe(df_sol[columnas], use_container_width=True)
+            id_eliminar = st.number_input("ID de solicitud a eliminar", min_value=1, step=1)
+            confirmar_id = st.checkbox("Confirmo que quiero eliminar esta solicitud", key="confirmar_eliminar_solicitud_id")
+            if st.button("🗑️ Eliminar solicitud seleccionada", use_container_width=True):
+                if not confirmar_id:
+                    st.warning("Debe marcar la confirmación antes de eliminar.")
+                else:
+                    ok, msg = eliminar_solicitud_por_id(id_eliminar)
+                    st.success(msg) if ok else st.error(msg)
+                    if ok:
+                        st.rerun()
+
+    with tab2:
+        st.write("### Resetear solicitudes de alimento")
+        st.warning("Esto elimina TODAS las solicitudes registradas. No elimina trabajadores, productos ni usuarios administradores.")
+        confirmacion = st.text_input("Para confirmar escriba exactamente: ELIMINAR SOLICITUDES", key="txt_reset_solicitudes")
+        if st.button("🧹 Eliminar todas las solicitudes", use_container_width=True):
+            if confirmacion != "ELIMINAR SOLICITUDES":
+                st.error("Texto de confirmación incorrecto.")
+            else:
+                ok, msg = eliminar_todos_registros_tabla("solicitudes_alimento")
+                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.rerun()
+
+        st.write("### Volver solicitudes a pendiente")
+        st.info("Esta opción no elimina datos; solo cambia el estado de todas las solicitudes a Pendiente.")
+        if st.button("↩️ Marcar todas como Pendiente", use_container_width=True):
+            ok, msg = marcar_solicitudes_pendientes()
+            st.success(msg) if ok else st.error(msg)
+            if ok:
+                st.rerun()
+
+    with tab3:
+        st.write("### Reset avanzado")
+        st.warning("Use esto solo si quiere dejar el portal limpio para comenzar de cero.")
+        st.markdown("""
+        **Opciones disponibles:**
+        - Solicitudes de alimento: borra solicitudes de prueba.
+        - Historial trabajadores: borra historial de cambios.
+        - Trabajadores: borra la lista de trabajadores.
+        - Productos: borra productos y precios cargados.
+        
+        **No se eliminan los usuarios administradores**, para que no pierda el acceso.
+        """)
+
+        borrar_solicitudes = st.checkbox("Eliminar solicitudes de alimento", value=True)
+        borrar_historial = st.checkbox("Eliminar historial de trabajadores", value=False)
+        borrar_trabajadores = st.checkbox("Eliminar trabajadores", value=False)
+        borrar_productos = st.checkbox("Eliminar productos", value=False)
+
+        confirmacion_total = st.text_input("Para confirmar escriba exactamente: RESET PORTAL", key="txt_reset_portal")
+
+        if st.button("⚠️ Ejecutar reset avanzado", use_container_width=True):
+            if confirmacion_total != "RESET PORTAL":
+                st.error("Texto de confirmación incorrecto.")
+            else:
+                acciones = []
+                if borrar_solicitudes:
+                    acciones.append(("solicitudes_alimento", "Solicitudes"))
+                if borrar_historial:
+                    acciones.append(("historial_trabajadores", "Historial"))
+                if borrar_trabajadores:
+                    acciones.append(("trabajadores", "Trabajadores"))
+                if borrar_productos:
+                    acciones.append(("productos_alimento", "Productos"))
+
+                if not acciones:
+                    st.warning("Debe seleccionar al menos una opción.")
+                else:
+                    resultados = []
+                    for tabla, nombre in acciones:
+                        ok, msg = eliminar_todos_registros_tabla(tabla)
+                        resultados.append({"Sección": nombre, "Resultado": "OK" if ok else "ERROR", "Detalle": msg})
+                    st.dataframe(pd.DataFrame(resultados), use_container_width=True)
+                    if all(r["Resultado"] == "OK" for r in resultados):
+                        st.success("Reset ejecutado correctamente.")
+                    else:
+                        st.warning("Algunas acciones no se pudieron completar. Revise el detalle.")
+
+
 # =========================================================
 # MÓDULO: CONFIGURACIÓN
 # =========================================================
@@ -1510,37 +1651,66 @@ if menu == "Reportes":
 if menu == "Configuración":
     st.markdown("""
     <div class="header">
-        <h1>⚙️ Configuración</h1>
-        <h3>SQL requerido para Supabase</h3>
+        <h1>⚙️ Configuración del sistema</h1>
+        <h3>Parámetros generales, estado y mantenimiento del Portal</h3>
     </div>
     """, unsafe_allow_html=True)
 
-    st.info("Ejecute este SQL una sola vez en Supabase para asegurar todas las columnas necesarias.")
+    st.success("El Portal está configurado para que el trabajador ingrese directo a Solicitud trabajador y el administrador entre con usuario y clave.")
 
-    st.code("""
-alter table trabajadores add column if not exists area text;
-alter table trabajadores add column if not exists cargo text;
-alter table trabajadores add column if not exists activo boolean default true;
+    st.write("### 📌 Parámetros actuales")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f'<div class="metric-card"><p>Día cierre solicitudes</p><div class="big-number">{DIA_CIERRE_SOLICITUD}</div></div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown(f'<div class="metric-card"><p>Día retiro alimento</p><div class="big-number">{DIA_RETIRO}</div></div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown(f'<div class="metric-card"><p>Máximo anticipo</p><div class="big-number">{formato_pesos(MONTO_MAXIMO_SOLICITUD)}</div></div>', unsafe_allow_html=True)
 
-alter table solicitudes_alimento add column if not exists monto_solicitado integer default 0;
+    st.write("### 🔐 Accesos")
+    st.info("El enlace normal abre solo la solicitud del trabajador. Para administración debes usar el enlace con ?admin=1 al final.")
 
-alter table productos_alimento add column if not exists precio integer default 0;
+    enlace_trabajador = "https://alfa-control-app-mvfc9nhfpzwgbjt2dnkfgn.streamlit.app"
+    enlace_admin = "https://alfa-control-app-mvfc9nhfpzwgbjt2dnkfgn.streamlit.app/?admin=1"
 
-create table if not exists historial_trabajadores (
-  id bigint generated by default as identity primary key,
-  fecha timestamp with time zone default now(),
-  accion text,
-  rut text,
-  nombre text,
-  detalle text
-);
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("**Enlace trabajador / QR**")
+        st.code(enlace_trabajador)
+    with c2:
+        st.write("**Enlace administrador**")
+        st.code(enlace_admin)
 
-create table if not exists usuarios_admin (
-  id bigint generated by default as identity primary key,
-  usuario text unique not null,
-  nombre text,
-  clave_hash text not null,
-  activo boolean default true,
-  creado timestamp with time zone default now()
-);
-""", language="sql")
+    st.write("### 🧾 Estado de la base de datos")
+    try:
+        total_trabajadores = len(obtener_trabajadores_df())
+        total_productos = len(obtener_productos_df())
+        total_solicitudes = len(obtener_solicitudes_df())
+        try:
+            total_admin = len(obtener_usuarios_admin_df())
+        except Exception:
+            total_admin = 0
+
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Trabajadores", total_trabajadores)
+        e2.metric("Productos", total_productos)
+        e3.metric("Solicitudes", total_solicitudes)
+        e4.metric("Usuarios admin", total_admin)
+        st.success("Conexión con Supabase funcionando correctamente.")
+    except Exception as e:
+        st.error(f"No se pudo verificar Supabase: {e}")
+
+    st.write("### 🧹 Mantenimiento")
+    st.warning("Para borrar pruebas o corregir equivocaciones, usa el módulo 'Reset / limpieza'.")
+
+    if st.button("Ir a Reset / limpieza", use_container_width=True):
+        st.info("Selecciona 'Reset / limpieza' en el menú lateral para eliminar solicitudes de prueba o registros incorrectos.")
+
+    st.write("### ✅ Recomendación antes de usar en la empresa")
+    st.markdown("""
+    - Hacer una prueba desde un celular con datos móviles.
+    - Crear una solicitud de prueba.
+    - Revisarla en Administrador.
+    - Descargar el Excel.
+    - Luego borrar la prueba desde **Reset / limpieza**.
+    """)
