@@ -1,6 +1,7 @@
 import streamlit as st
 from supabase import create_client
 import pandas as pd
+import hashlib
 from io import BytesIO
 from datetime import datetime
 from openpyxl import Workbook
@@ -135,7 +136,131 @@ def solicitudes_abiertas():
 
 
 def validar_admin(clave):
+    # Mantiene compatibilidad con módulos antiguos, pero si ya inició sesión
+    # como administrador no vuelve a pedir la clave simple.
+    if st.session_state.get("admin_logueado"):
+        return True
     return clave == CLAVE_ADMIN
+
+
+def encriptar_clave(clave):
+    return hashlib.sha256(str(clave).encode("utf-8")).hexdigest()
+
+
+def obtener_usuarios_admin_df():
+    try:
+        res = supabase.table("usuarios_admin").select("*").order("usuario").execute()
+        return pd.DataFrame(res.data)
+    except Exception:
+        return pd.DataFrame()
+
+
+def validar_credenciales_admin(usuario, clave):
+    usuario = limpiar_texto(usuario).lower()
+    clave = limpiar_texto(clave)
+
+    if not usuario or not clave:
+        return False, "Debe ingresar usuario y clave."
+
+    try:
+        res = (
+            supabase.table("usuarios_admin")
+            .select("*")
+            .eq("usuario", usuario)
+            .eq("activo", True)
+            .execute()
+        )
+        if res.data:
+            admin = res.data[0]
+            if admin.get("clave_hash") == encriptar_clave(clave):
+                return True, admin.get("nombre") or usuario
+            return False, "Usuario o clave incorrecta."
+    except Exception:
+        pass
+
+    # Usuario de respaldo inicial. Sirve para entrar la primera vez y crear usuarios.
+    if usuario == "franco" and clave == CLAVE_ADMIN:
+        return True, "franco"
+
+    return False, "Usuario o clave incorrecta."
+
+
+def login_admin():
+    st.markdown("""
+    <div class="header">
+        <h1>🔐 Acceso administrador</h1>
+        <h3>Ingrese usuario y clave para administrar el portal</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    usuario = c1.text_input("Usuario")
+    clave = c2.text_input("Clave", type="password")
+
+    if st.button("Ingresar", use_container_width=True):
+        ok, nombre = validar_credenciales_admin(usuario, clave)
+        if ok:
+            st.session_state["admin_logueado"] = True
+            st.session_state["usuario_admin"] = limpiar_texto(usuario).lower()
+            st.session_state["nombre_admin"] = nombre
+            st.success("Acceso correcto.")
+            st.rerun()
+        else:
+            st.error(nombre)
+
+    st.info("Usuario inicial de respaldo: franco / 1234. Después puede crear usuarios reales en el módulo Usuarios admin.")
+
+
+def agregar_usuario_admin(usuario, nombre, clave, activo=True):
+    usuario = limpiar_texto(usuario).lower()
+    nombre = limpiar_texto(nombre) or usuario
+
+    if not usuario or not clave:
+        return False, "Debe ingresar usuario y clave."
+
+    if len(clave) < 4:
+        return False, "La clave debe tener al menos 4 caracteres."
+
+    try:
+        existe = supabase.table("usuarios_admin").select("*").eq("usuario", usuario).execute()
+        if existe.data:
+            return False, "Ese usuario ya existe."
+
+        supabase.table("usuarios_admin").insert({
+            "usuario": usuario,
+            "nombre": nombre,
+            "clave_hash": encriptar_clave(clave),
+            "activo": bool(activo),
+            "creado": datetime.now().isoformat()
+        }).execute()
+        return True, "Usuario administrador creado correctamente."
+    except Exception as e:
+        return False, f"No se pudo crear usuario. Revise que la tabla usuarios_admin exista en Supabase. Error: {e}"
+
+
+def actualizar_usuario_admin(id_usuario, nombre, nueva_clave=None, activo=True):
+    data = {
+        "nombre": limpiar_texto(nombre),
+        "activo": bool(activo)
+    }
+    if nueva_clave:
+        if len(nueva_clave) < 4:
+            return False, "La nueva clave debe tener al menos 4 caracteres."
+        data["clave_hash"] = encriptar_clave(nueva_clave)
+
+    try:
+        supabase.table("usuarios_admin").update(data).eq("id", int(id_usuario)).execute()
+        return True, "Usuario actualizado correctamente."
+    except Exception as e:
+        return False, f"No se pudo actualizar usuario: {e}"
+
+
+def eliminar_usuario_admin(id_usuario):
+    try:
+        supabase.table("usuarios_admin").delete().eq("id", int(id_usuario)).execute()
+        return True, "Usuario eliminado correctamente."
+    except Exception as e:
+        return False, f"No se pudo eliminar usuario: {e}"
 
 
 # =========================================================
@@ -673,22 +798,51 @@ def convertir_excel_formato_quincenal(df_filtrado, mes_seleccionado):
 
 
 # =========================================================
-# UI: MENÚ
+# UI: MENÚ Y ACCESO
 # =========================================================
 
-st.sidebar.title("📦 ALFA Control")
-menu = st.sidebar.radio(
-    "Seleccione módulo",
-    [
-        "Inicio",
-        "Solicitud trabajador",
-        "Administrador",
-        "Trabajadores",
-        "Productos",
-        "Reportes",
-        "Configuración"
-    ]
-)
+# Enlace normal / QR: abre directo la solicitud del trabajador y oculta menú.
+# Enlace administrador: agregue ?admin=1 al final del enlace público.
+modo_admin = "admin" in st.query_params
+
+if not modo_admin:
+    st.markdown("""
+    <style>
+        [data-testid="stSidebar"] {display: none;}
+        .block-container {max-width: 950px;}
+    </style>
+    """, unsafe_allow_html=True)
+    menu = "Solicitud trabajador"
+else:
+    if "admin_logueado" not in st.session_state:
+        st.session_state["admin_logueado"] = False
+
+    if not st.session_state["admin_logueado"]:
+        login_admin()
+        st.stop()
+
+    st.sidebar.title("📦 ALFA Control")
+    st.sidebar.success(f"Admin: {st.session_state.get('nombre_admin', st.session_state.get('usuario_admin', ''))}")
+
+    if st.sidebar.button("Cerrar sesión"):
+        st.session_state["admin_logueado"] = False
+        st.session_state["usuario_admin"] = ""
+        st.session_state["nombre_admin"] = ""
+        st.rerun()
+
+    menu = st.sidebar.radio(
+        "Seleccione módulo",
+        [
+            "Inicio",
+            "Solicitud trabajador",
+            "Administrador",
+            "Trabajadores",
+            "Productos",
+            "Usuarios admin",
+            "Reportes",
+            "Configuración"
+        ]
+    )
 
 # =========================================================
 # MÓDULO: INICIO
@@ -855,11 +1009,6 @@ if menu == "Administrador":
     </div>
     """, unsafe_allow_html=True)
 
-    clave = st.text_input("Ingrese clave de administrador", type="password")
-    if not validar_admin(clave):
-        st.warning("Ingrese la clave para ver el panel.")
-        st.stop()
-
     df = preparar_solicitudes_con_nombre()
     if df.empty:
         st.info("No hay solicitudes registradas.")
@@ -1020,11 +1169,6 @@ if menu == "Trabajadores":
     </div>
     """, unsafe_allow_html=True)
 
-    clave = st.text_input("Ingrese clave de administrador", type="password", key="clave_trab")
-    if not validar_admin(clave):
-        st.warning("Ingrese la clave para administrar trabajadores.")
-        st.stop()
-
     df = obtener_trabajadores_df()
 
     tab1, tab2, tab3, tab4 = st.tabs(["👤 Ficha", "📂 Importar Excel", "📋 Listado", "📝 Historial"])
@@ -1152,11 +1296,6 @@ if menu == "Productos":
     </div>
     """, unsafe_allow_html=True)
 
-    clave = st.text_input("Ingrese clave de administrador", type="password", key="clave_prod")
-    if not validar_admin(clave):
-        st.warning("Ingrese la clave para administrar productos.")
-        st.stop()
-
     df = obtener_productos_df()
 
     st.write("### 🔄 Cargar precios oficiales")
@@ -1235,6 +1374,88 @@ if menu == "Productos":
 
 
 # =========================================================
+# MÓDULO: USUARIOS ADMIN
+# =========================================================
+
+if menu == "Usuarios admin":
+    st.markdown("""
+    <div class="header">
+        <h1>👤 Usuarios administradores</h1>
+        <h3>Usuarios autorizados para ver administración</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.warning("Si todavía no creó la tabla en Supabase, vaya a Configuración y copie el SQL actualizado.")
+
+    tab1, tab2, tab3 = st.tabs(["➕ Agregar usuario", "✏️ Editar usuario", "📋 Listado"])
+
+    with tab1:
+        c1, c2 = st.columns(2)
+        nuevo_usuario = c1.text_input("Usuario", placeholder="Ej: franco")
+        nombre = c1.text_input("Nombre", placeholder="Ej: Franco Gallardo")
+        nueva_clave = c2.text_input("Clave", type="password")
+        repetir_clave = c2.text_input("Repetir clave", type="password")
+        activo = c2.checkbox("Activo", value=True, key="admin_nuevo_activo")
+
+        if st.button("✅ Crear usuario administrador", use_container_width=True):
+            if nueva_clave != repetir_clave:
+                st.error("Las claves no coinciden.")
+            else:
+                ok, msg = agregar_usuario_admin(nuevo_usuario, nombre, nueva_clave, activo)
+                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.rerun()
+
+    df_admin = obtener_usuarios_admin_df()
+
+    with tab2:
+        if df_admin.empty:
+            st.info("No hay usuarios administradores guardados en Supabase o falta crear la tabla usuarios_admin.")
+        else:
+            opciones = {f"{r.get('usuario', '')} | {r.get('nombre', '')} | ID {r.get('id')}": r.get("id") for _, r in df_admin.iterrows()}
+            sel = st.selectbox("Seleccione usuario", list(opciones.keys()))
+            id_usuario = opciones[sel]
+            actual = df_admin[df_admin["id"] == id_usuario].iloc[0]
+
+            c1, c2 = st.columns(2)
+            c1.text_input("Usuario", value=limpiar_texto(actual.get("usuario")), disabled=True)
+            nombre_editar = c1.text_input("Nombre", value=limpiar_texto(actual.get("nombre")))
+            nueva_clave_editar = c2.text_input("Nueva clave (dejar vacío para mantener)", type="password")
+            activo_editar = c2.checkbox("Activo", value=bool(actual.get("activo", True)), key=f"admin_activo_{id_usuario}")
+
+            col_a, col_b = st.columns(2)
+            if col_a.button("💾 Actualizar usuario", use_container_width=True):
+                ok, msg = actualizar_usuario_admin(id_usuario, nombre_editar, nueva_clave_editar or None, activo_editar)
+                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.rerun()
+
+            confirmar = col_b.checkbox("Confirmo eliminar", key=f"confirmar_admin_{id_usuario}")
+            if col_b.button("🗑️ Eliminar usuario", use_container_width=True):
+                if confirmar:
+                    ok, msg = eliminar_usuario_admin(id_usuario)
+                    st.success(msg) if ok else st.error(msg)
+                    if ok:
+                        st.rerun()
+                else:
+                    st.warning("Debe confirmar la eliminación.")
+
+    with tab3:
+        if df_admin.empty:
+            st.info("No hay usuarios administradores para mostrar.")
+        else:
+            cols = [c for c in ["id", "usuario", "nombre", "activo", "creado"] if c in df_admin.columns]
+            st.dataframe(df_admin[cols], use_container_width=True)
+            st.download_button(
+                "📥 Descargar usuarios admin",
+                data=convertir_excel(df_admin[cols], "Usuarios admin"),
+                file_name="usuarios_admin.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+
+# =========================================================
 # MÓDULO: REPORTES
 # =========================================================
 
@@ -1245,11 +1466,6 @@ if menu == "Reportes":
         <h3>Resumen general de solicitudes</h3>
     </div>
     """, unsafe_allow_html=True)
-
-    clave = st.text_input("Ingrese clave de administrador", type="password", key="clave_reportes")
-    if not validar_admin(clave):
-        st.warning("Ingrese la clave para ver reportes.")
-        st.stop()
 
     df = preparar_solicitudes_con_nombre()
     if df.empty:
@@ -1317,5 +1533,14 @@ create table if not exists historial_trabajadores (
   rut text,
   nombre text,
   detalle text
+);
+
+create table if not exists usuarios_admin (
+  id bigint generated by default as identity primary key,
+  usuario text unique not null,
+  nombre text,
+  clave_hash text not null,
+  activo boolean default true,
+  creado timestamp with time zone default now()
 );
 """, language="sql")
